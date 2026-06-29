@@ -15,6 +15,7 @@ import argparse
 import logging
 import math
 import os
+import re
 import sys
 
 import torch
@@ -82,9 +83,18 @@ def main():
 
     logger = False
     if cfg.use_wandb:
+        # Stable run id (sanitized from the run name) + resume="allow" so resuming
+        # training continues the SAME wandb run instead of starting a new one.
+        run_id = (re.sub(r"[^A-Za-z0-9_.-]", "-", cfg.wandb_run_name)
+                  if cfg.wandb_run_name else None)
         logger = WandbLogger(project=cfg.wandb_project, entity=cfg.wandb_entity,
-                             name=cfg.wandb_run_name, save_dir="/tmp",
+                             name=cfg.wandb_run_name, id=run_id, resume="allow",
+                             save_dir="/tmp",
                              tags=cfg.wandb_tag.split(",") if cfg.wandb_tag else None)
+
+    # eval-time distilled-guidance scale (only effective if trained with cfg tokens)
+    eval_sc_cfg_scale = (cfg.epoch_eval_self_cond_cfg_scale
+                         if cfg.num_self_cond_cfg_tokens > 0 else 1.0)
 
     callbacks = [ModelCheckpoint(
         dirpath=cfg.output_dir, filename="checkpoint_epoch{epoch:02d}_step{step:08d}",
@@ -97,6 +107,7 @@ def main():
             num_sampling_steps=cfg.epoch_eval_num_sampling_steps,
             sample_method=cfg.pixel_sample_method, sde_gamma=cfg.epoch_eval_sde_gamma,
             num_images=cfg.pixel_eval_num_images, eval_freq=int(cfg.eval_freq),
+            self_cond_cfg_scale=eval_sc_cfg_scale,
             eval_ppl_model=cfg.eval_ppl_model, eval_ppl_batch_size=cfg.eval_ppl_batch_size,
             eval_ppl_max_length=cfg.eval_ppl_max_length))
 
@@ -114,13 +125,16 @@ def main():
         if os.path.exists(last):
             ckpt_path = last
 
+    snap = {k: ([vars(sc) for sc in v]
+                if isinstance(v, list) and v and isinstance(v[0], SamplingConfig) else v)
+            for k, v in vars(cfg).items()}
     if trainer.is_global_zero:
         os.makedirs(cfg.output_dir, exist_ok=True)
-        snap = {k: ([vars(sc) for sc in v]
-                    if isinstance(v, list) and v and isinstance(v[0], SamplingConfig) else v)
-                for k, v in vars(cfg).items()}
         with open(os.path.join(cfg.output_dir, "config.yml"), "w") as f:
             yaml.dump(snap, f, default_flow_style=False, sort_keys=False)
+    # Log the full resolved config to the wandb run (Overview/Config tab).
+    if logger:
+        logger.log_hyperparams(snap)
 
     # Build the windowing index once so the LR schedule knows steps/epoch.
     datamodule.setup()

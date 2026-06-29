@@ -7,14 +7,16 @@ Only two things change:
   * `__init__` — no frozen T5 encoder; build an `ELFPixel` model instead. `x0`
     is produced deterministically by rendering text to a glyph strip and
     patchifying it (the glyph atlas IS the "frozen encoder").
-  * `training_step` — the *minimal baseline*: a Bernoulli(decoder_prob) branch
-    select between the pixel velocity-MSE denoiser and the OCR cross-entropy
-    decoder. No self-conditioning / CFG / label-drop (those knobs stay off; the
-    model + flow utils already support turning them on later).
+  * `training_step` — a Bernoulli(decoder_prob) branch select between the pixel
+    velocity-MSE denoiser and the OCR cross-entropy decoder, with **optional
+    self-conditioning and CFG guidance-distillation** (gated by `self_cond_prob` /
+    `num_self_cond_cfg_tokens`, off when 0 — same math as the parent
+    `ELFLitModule.training_step`, minus the conditional-prefix masking which is
+    identity for unconditional pixel generation).
 
 Everything in `utils/sampling_utils.py` is reused: `add_noise`, `sample_timesteps`,
-and `net_out_to_v_x` operate on the (B, N, P) patch sequence exactly as they do
-on T5 (B, L, D) embeddings.
+`sample_cfg_scale`, and `net_out_to_v_x` operate on the (B, N, P) patch sequence
+exactly as they do on T5 (B, L, D) embeddings.
 """
 
 from typing import Dict
@@ -24,7 +26,9 @@ import torch
 import torch.nn.functional as F
 
 from lightning_module import ELFLitModule
-from utils.sampling_utils import add_noise, net_out_to_v_x, sample_timesteps
+from utils.sampling_utils import (
+    add_noise, net_out_to_v_x, sample_cfg_scale, sample_timesteps,
+)
 
 from pixel.glyph_dataset import (
     ContinuousDocumentStreamDataset, load_text_dataset, make_glyph_collate_with_labels,
@@ -55,7 +59,9 @@ class ELFPixelLitModule(ELFLitModule):
             num_time_tokens=config.num_time_tokens,
             num_self_cond_cfg_tokens=config.num_self_cond_cfg_tokens,
             num_model_mode_tokens=config.num_model_mode_tokens,
-            self_cond_input=(config.self_cond_prob > 0),
+            # 2-channel input is needed by BOTH self-conditioning and CFG
+            # distillation (the CFG forwards feed a hint channel too).
+            self_cond_input=(config.self_cond_prob > 0 or config.num_self_cond_cfg_tokens > 0),
             use_flash=config.use_flash,
         )
 
@@ -91,6 +97,18 @@ class ELFPixelLitModule(ELFLitModule):
         B = x0.shape[0]
         V = self.vocab_size
 
+        # which samples get a REAL self-cond hint, and a per-sample CFG scale
+        use_self_cond_mask = None
+        if cfg.self_cond_prob > 0:
+            use_self_cond_mask = ((torch.rand(B, generator=gen, device=device)
+                                   < cfg.self_cond_prob).view(-1, 1, 1).to(x0.dtype))
+        sc_cfg_scale = None
+        if cfg.num_self_cond_cfg_tokens > 0:
+            sc_cfg_scale = sample_cfg_scale(
+                gen, B, device=device, cfg_min=cfg.self_cond_cfg_min,
+                cfg_max=cfg.self_cond_cfg_max).to(x0.dtype)
+        self_cond_on = cfg.self_cond_prob > 0
+
         decoder_step_active = bool(
             (torch.rand((), generator=gen, device=device) < cfg.decoder_prob).item())
 
@@ -103,23 +121,60 @@ class ELFPixelLitModule(ELFLitModule):
             noise = (torch.randn(x0.shape, generator=gen, device=device, dtype=x0.dtype)
                      * cfg.decoder_noise_scale)
             decoder_z = lam * x0 + (1.0 - lam) * noise
+            dec_in = (torch.cat([decoder_z, torch.zeros_like(decoder_z)], dim=-1)
+                      if self_cond_on else decoder_z)
             t1 = torch.ones(B, device=device)
-            _, logits = self.model(decoder_z, t1, decoder_step_active=True)
+            _, logits = self.model(dec_in, t1, self_cond_cfg_scale=sc_cfg_scale,
+                                    decoder_step_active=True)
             ce_loss = F.cross_entropy(logits.reshape(-1, V).float(),
                                       char_indices.reshape(-1), ignore_index=IGNORE_INDEX)
             loss = ce_loss
             l2_loss = torch.zeros((), device=device)
         else:
-            # --- denoiser branch (velocity MSE) ---
+            # --- denoiser branch (velocity MSE, + self-cond, + CFG distillation) ---
             t = sample_timesteps(gen, B, device=device,
                                  P_mean=cfg.denoiser_p_mean, P_std=cfg.denoiser_p_std,
                                  time_schedule=cfg.time_schedule)
             noise = torch.randn(x0.shape, generator=gen, device=device, dtype=x0.dtype)
             z = add_noise(x0, noise, t, cfg)
             v_target = (x0 - z) / torch.clamp(1.0 - t.view(-1, 1, 1), min=cfg.t_eps)
-            net_out = self.model(z, t, decoder_step_active=False)
+
+            # self-conditioning: one stop-grad forward produces the hint fed back in
+            # (zeros for non-selected samples). The 2nd input channel carries the hint.
+            if self_cond_on:
+                with torch.no_grad():
+                    init_out = self.model(torch.cat([z, torch.zeros_like(z)], dim=-1), t,
+                                          self_cond_cfg_scale=sc_cfg_scale)
+                    _, x_pred_init = net_out_to_v_x(init_out, z, t, cfg.t_eps)
+                    x_hint = x_pred_init * use_self_cond_mask
+                denoiser_input = torch.cat([z, x_hint], dim=-1)
+            else:
+                denoiser_input = z
+
+            net_out = self.model(denoiser_input, t, self_cond_cfg_scale=sc_cfg_scale,
+                                 decoder_step_active=False)
             v_pred, _ = net_out_to_v_x(net_out, z, t, cfg.t_eps)
-            l2_loss = ((v_pred - v_target) ** 2).mean()
+
+            # CFG guidance distillation: two stop-grad forwards (uncond hint, then
+            # cond hint=x_uncond) build a guided velocity target the net distills into.
+            if cfg.num_self_cond_cfg_tokens > 0:
+                with torch.no_grad():
+                    uncond_out = self.model(torch.cat([z, torch.zeros_like(z)], dim=-1), t,
+                                            self_cond_cfg_scale=sc_cfg_scale)
+                    v_uncond, x_uncond = net_out_to_v_x(uncond_out, z, t, cfg.t_eps)
+                    cond_out = self.model(torch.cat([z, x_uncond], dim=-1), t,
+                                          self_cond_cfg_scale=sc_cfg_scale)
+                    v_cond, _ = net_out_to_v_x(cond_out, z, t, cfg.t_eps)
+                    sc_w = sc_cfg_scale.view(B, 1, 1).to(v_target.dtype)
+                    sc_guidance = (1.0 - 1.0 / sc_w) * (v_cond - v_uncond)
+                    if use_self_cond_mask is not None:        # guide only self-cond samples
+                        sc_guidance = torch.where(use_self_cond_mask > 0, sc_guidance,
+                                                  torch.zeros_like(sc_guidance))
+                    v_final_target = (v_target + sc_guidance).detach()
+            else:
+                v_final_target = v_target
+
+            l2_loss = ((v_pred - v_final_target) ** 2).mean()
             loss = l2_loss
             ce_loss = torch.zeros((), device=device)
 

@@ -7,11 +7,12 @@ rendered glyph strip**. Text is rendered to a fixed monospaced image via a glyph
 *atlas* (one Unicode char → one fixed 16×8 glyph), the flow generates such an
 image, and an OCR decode head reads it back to characters.
 
-> **Status:** minimal baseline — pixel velocity-MSE **denoiser** + OCR
-> cross-entropy **decoder**. Self-conditioning / CFG-distillation / in-context
-> conditioning tokens are *wired but disabled by default* (see
-> [§7 Extending](#7-extending-to-self-cond--cfg)). The code reuses ELF's flow
-> math, sampler, EMA, optimizer, and trainer verbatim.
+> **Status:** pixel velocity-MSE **denoiser** + OCR cross-entropy **decoder**,
+> with **self-conditioning** and **CFG guidance-distillation** implemented and
+> toggled by config (`self_cond_prob`, `num_self_cond_cfg_tokens`; 0 = off).
+> In-context conditioning (time/mode/cfg prefix tokens) is the design, as in ELF.
+> The code reuses ELF's flow math, sampler, EMA, optimizer, and trainer verbatim.
+> See [§7](#7-feature-toggles--whats-still-open) for the toggles.
 
 ---
 
@@ -157,10 +158,23 @@ Per optimizer step, a `Bernoulli(decoder_prob)` coin selects **one** branch
   `z = λ·x0 + (1-λ)·ε·decoder_noise_scale` read at `t=1`, **cross-entropy** over the
   glyph vocab with `ignore_index=-100` on empty (white) cells.
 
-EMA, grad-clip(1.0), manual optimizer step, the LR schedule, and checkpoint
-plumbing are all inherited from `ELFLitModule` unchanged. `x0` is produced by
-`patchify(pixel_values·2-1)` instead of `encode_text(...)` — that single line is
-the whole "no T5 encoder" difference.
+**Self-conditioning** (when `self_cond_prob > 0`): a stop-grad forward on
+`[z, 0]` produces `x̂_init`; it is fed back as the 2nd input channel
+(`[z, x̂_init·mask]`, zeros for non-selected samples) on the gradient forward —
+same as ELF, on `(B,N,P)` instead of `(B,L,D)`.
+
+**CFG guidance distillation** (when `num_self_cond_cfg_tokens > 0`): two extra
+stop-grad forwards (uncond hint `[z,0]`, then cond hint `[z, x̂_uncond]`, both
+carrying a per-sample log-uniform scale `w` in the cfg prefix tokens) build a
+guided target `v_target + (1-1/w)·(v_cond-v_uncond)` the gradient forward distills
+into. At inference, a single `self_cond_cfg_scale` (default `epoch_eval_self_cond_cfg_scale=3.0`)
+selects the baked-in guidance level.
+
+The conditional-prefix masking ELF uses (`cond_seq_mask`/`restore_cond`) is the
+identity here (unconditional generation), so it is dropped. EMA, grad-clip(1.0),
+manual optimizer step, the LR schedule, and checkpoint plumbing are inherited from
+`ELFLitModule` unchanged. `x0` is `patchify(pixel_values·2-1)` instead of
+`encode_text(...)` — that one line is the whole "no T5 encoder" difference.
 
 ---
 
@@ -206,7 +220,20 @@ torchrun --nproc_per_node=1 train_pixel_lightning.py \
 
 Outputs land in `output_dir`: `last.ckpt` + per-epoch checkpoints, `config.yml`
 snapshot, and (when `online_eval`) `pixel_epoch_NNN/{decoded.txt, *.png,
-metrics.jsonl}` plus `eval/gen_ppl` + `eval/sample_entropy` to W&B.
+metrics.jsonl}`.
+
+**W&B logging** (when `use_wandb: true`; entity/project/run from `wandb_entity`/
+`wandb_project`/`wandb_run_name`):
+- **scalars** every `log_freq` opt steps: `train/loss`, `train/l2_loss`,
+  `train/ce_loss` (each un-biased by its branch probability), `train/lr`; and per
+  eval `eval/gen_ppl`, `eval/sample_entropy`.
+- **config**: the full resolved `Config` is logged to the run (Overview/Config tab)
+  via `logger.log_hyperparams(...)` in the entry.
+- **samples**: a `wandb.Table` (`samples`) with the generated glyph-strip image +
+  its decoded text, logged each eval by `PixelGenEvalCallback`.
+- **resume**: the run `id` is derived from `wandb_run_name` with `resume="allow"`,
+  so resuming training (auto-detected `last.ckpt`, or `--config_override resume=…`)
+  continues the **same** W&B run instead of starting a new one.
 
 **Key hyperparameters** (`train_lm1b_pixel_ELF-B.yml`): AdamW lr 2e-4 constant,
 β(0.9,0.95), wd 0, batch 512, 60 epochs, bf16-mixed, EMA 0.9999; denoiser
@@ -220,25 +247,30 @@ gen-PPL via gpt2-large.
 
 ---
 
-## 7. Extending to self-cond / CFG
+## 7. Feature toggles & what's still open
 
-The model and the reused flow utilities already support the full ELF feature set;
-the minimal baseline just keeps the knobs off. To enable, in the YAML:
+Self-conditioning and CFG distillation are **implemented** (§4) and switched by
+config — no code change needed:
 
-- **Self-conditioning**: set `self_cond_prob: 0.5`. The model is built with
-  `self_cond_input=True` (2-channel patch input + `self_cond_proj`), and the
-  training step needs the self-cond pre-forward added back (mirror
-  `ELFLitModule.training_step` lines ~226-235, which already implement it for the
-  `(B,L,D)` case — it transfers directly to `(B,N,P)`).
-- **CFG / guidance distillation**: set `num_self_cond_cfg_tokens: 4` and
-  `self_cond_cfg_min/max`. The cfg prefix tokens + embedder exist in `ELFPixel`;
-  reuse the parent's guidance-distillation block (lines ~243-258) and pass an
-  inference scale through `generate_pixel_samples`.
-- **In-context conditioning** is already the design here (time/mode/cfg are prefix
-  tokens, not adaLN), matching ELF; `num_model_mode_tokens` signals decode mode.
+- **Self-conditioning**: `self_cond_prob: 0.5` (0 = off). Builds the 2-channel
+  patch input + `self_cond_proj`; training does the stop-grad hint forward;
+  sampling threads `x̂_prev` across steps.
+- **CFG / guidance distillation**: `num_self_cond_cfg_tokens: 4` (0 = off) with
+  `self_cond_cfg_min/max` (train scale range) and `epoch_eval_self_cond_cfg_scale`
+  (inference scale, default 3.0). Builds the cfg prefix tokens + embedder.
+- **In-context conditioning** is the design (time/mode/cfg are prefix tokens, not
+  adaLN), matching ELF; `num_model_mode_tokens` signals decode mode.
 
-Because the only modality-specific surface is the patch-in / pixel-out / OCR head,
-turning these on is a `training_step` edit, not an architecture change.
+> **Config constraint:** CFG tokens require the 2-channel input, so the model is
+> built with `self_cond_input = (self_cond_prob>0 or num_self_cond_cfg_tokens>0)`.
+> In practice use CFG together with self-cond (both > 0), as the shipped config does.
+
+Still open (not yet ported from the source experiment): the **staged warmup**
+schedule (introduce self-cond at epoch N, CFG at epoch M — `flm_ours` did this via
+epoch-gated switches), the E4 **hint clamp / guidance t-gate** stabilizers, and the
+training-free **GlyphCNN/nearest-glyph** decode path (here only the model's own OCR
+head decodes). The architecture supports all of these as `training_step` / eval
+edits, not structural changes.
 
 ---
 

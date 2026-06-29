@@ -35,25 +35,25 @@ model: ELFPixel-B             # depth 12, hidden 768, heads 12
 bottleneck_dim: 128
 num_time_tokens: 4
 num_model_mode_tokens: 4      # decode-mode signal (denoiser vs OCR)
-num_self_cond_cfg_tokens: 0   # minimal baseline: CFG off
+num_self_cond_cfg_tokens: 4   # minimal baseline: CFG off / CFG on: 4
 attn_dropout: 0.0
 proj_dropout: 0.0
 
 # --- Denoiser objective (pixel velocity MSE) ---
 denoiser_p_mean: -0.8
 denoiser_p_std: 0.8
-denoiser_noise_scale: 1.0
+denoiser_noise_scale: 1.0     # reduced, compared to ELF
 t_eps: 0.05
 time_schedule: "logit_normal"
 
 # --- Decoder objective (OCR cross-entropy) ---
 decoder_prob: 0.2
-decoder_noise_scale: 2.0
+decoder_noise_scale: 2.0      # reduced, compared to ELF
 decoder_p_mean: 0.8
 decoder_p_std: 0.8
 
 # --- Conditioning ---
-self_cond_prob: 0.0           # minimal baseline: self-conditioning off
+self_cond_prob: 0.5           # minimal baseline: self-conditioning off / SC on: 0.5
 
 # --- Training ---
 epochs: 60
@@ -75,21 +75,21 @@ ema_decay1: 0.9999
 
 # --- Sampling / eval ---
 pixel_sample_method: "ode"    # "ode" (Euler) | "sde"
-num_samples: 256
+num_samples: 1000
 
 # --- Logging / checkpointing ---
 log_freq: 100
-save_freq: 10
-eval_freq: 10
+save_freq: 5
+eval_freq: 5
 
 # --- Output ---
 output_dir: "outputs/elf_pixel_lm1b"
 resume: null
 
 # --- Wandb ---
-use_wandb: false
+use_wandb: true
 wandb_project: elf-pixel
-wandb_entity: null
+wandb_entity: kma_vllab
 wandb_run_name: elf_pixel_lm1b
 
 # --- Misc ---
@@ -101,11 +101,11 @@ persistent_workers: true
 
 # --- Optimization knobs ---
 use_flash: true
-precision: bf16-mixed
+precision: fp32
 
 # --- Per-epoch eval callback ---
 epoch_eval_num_samples: 64
-epoch_eval_num_sampling_steps: 256
+epoch_eval_num_sampling_steps: 1024
 epoch_eval_sde_gamma: 1.5
 pixel_eval_num_images: 4
 eval_ppl_model: gpt2-large

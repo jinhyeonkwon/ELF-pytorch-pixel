@@ -34,12 +34,17 @@ _GAP = 4
 
 @torch.no_grad()
 def generate_pixel_samples(model, cfg, *, num: int, steps: int, method: str,
-                           sde_gamma: float, device, generator):
-    """Return (images (num,1,H,W) in [-1,1], glyph_idx (num, max_chars))."""
+                           sde_gamma: float, device, generator,
+                           self_cond_cfg_scale: float = 1.0):
+    """Return (images (num,1,H,W) in [-1,1], glyph_idx (num, max_chars)).
+
+    `self_cond_cfg_scale` is the distilled-guidance scale used at inference; only
+    has effect when the model was trained with `num_self_cond_cfg_tokens > 0`.
+    """
     P = model.text_encoder_dim                       # per-patch pixel dim
     N = model.max_length
     sc = SamplingConfig(sampling_method=method, num_sampling_steps=[steps],
-                        cfgs=[1], self_cond_cfg_scales=[1.0], sde_gamma=sde_gamma,
+                        cfgs=[1], self_cond_cfg_scales=[self_cond_cfg_scale], sde_gamma=sde_gamma,
                         time_schedule="logit_normal")
     t_steps = get_sampling_steps(generator, n_steps=steps, device=device,
                                  time_schedule="logit_normal",
@@ -47,8 +52,9 @@ def generate_pixel_samples(model, cfg, *, num: int, steps: int, method: str,
     z = torch.randn((num, N, P), generator=generator, device=device) * cfg.denoiser_noise_scale
     latent = generate_samples(model, z, t_steps, cond_seq=None, cond_seq_mask=None,
                               config=cfg, sampling_config=sc, cfg_scale=1.0,
-                              self_cond_cfg_scale=1.0, generator=generator)
-    glyph_idx = dlm_decode_batch(model, latent, config=cfg, self_cond_cfg_scale=1.0,
+                              self_cond_cfg_scale=self_cond_cfg_scale, generator=generator)
+    glyph_idx = dlm_decode_batch(model, latent, config=cfg,
+                                 self_cond_cfg_scale=self_cond_cfg_scale,
                                  t_final_val=float(t_steps[-1].item()))
     images = unpatchify(latent, cfg.patch_h, cfg.patch_w, channels=1)   # (num,1,H,W)
     return images, glyph_idx
@@ -69,9 +75,10 @@ def _to_strip_png(img_u8: np.ndarray) -> np.ndarray:
 
 
 def _save_png(path: str, img_u8: np.ndarray) -> None:
+    """Save an already-wrapped (H, W) uint8 strip; no-op if PIL is missing."""
     try:
         from PIL import Image
-        Image.fromarray(_to_strip_png(img_u8)).save(path)
+        Image.fromarray(img_u8).save(path)
     except Exception as e:                            # PIL missing / write error -> skip quietly
         print(f"[pixel-eval] PNG dump skipped ({e})")
 
@@ -81,7 +88,7 @@ class PixelGenEvalCallback(Callback):
 
     def __init__(self, *, vocab, output_dir: str, num_samples: int,
                  num_sampling_steps: int, sample_method: str, sde_gamma: float,
-                 num_images: int, eval_freq: int,
+                 num_images: int, eval_freq: int, self_cond_cfg_scale: float,
                  eval_ppl_model: str, eval_ppl_batch_size: int, eval_ppl_max_length: int):
         super().__init__()
         self.index_to_char = build_index_to_char(vocab)
@@ -92,6 +99,7 @@ class PixelGenEvalCallback(Callback):
         self.sde_gamma = sde_gamma
         self.num_images = num_images
         self.eval_freq = max(1, eval_freq)
+        self.self_cond_cfg_scale = self_cond_cfg_scale
         self.eval_ppl_model = eval_ppl_model
         self.eval_ppl_batch_size = eval_ppl_batch_size
         self.eval_ppl_max_length = eval_ppl_max_length
@@ -125,7 +133,8 @@ class PixelGenEvalCallback(Callback):
                 images, glyph_idx = generate_pixel_samples(
                     pl_module.model, cfg, num=cur, steps=self.num_sampling_steps,
                     method=self.sample_method, sde_gamma=self.sde_gamma,
-                    device=device, generator=gen)
+                    device=device, generator=gen,
+                    self_cond_cfg_scale=self.self_cond_cfg_scale)
                 rows = [indices_to_text(glyph_idx[i].cpu(), self.index_to_char)
                         for i in range(cur)]
                 gathered = self._all_gather_obj(rows, world_size)
@@ -139,10 +148,14 @@ class PixelGenEvalCallback(Callback):
                 with open(os.path.join(out_dir, "decoded.txt"), "w", encoding="utf-8") as f:
                     for i, t in enumerate(texts):
                         f.write(f"[{i:05d}]\n{t}\n\n")
+                strips = []                                   # (uint8 strip, decoded text)
                 for i in range(first_images.shape[0]):
                     u8 = np.round(((first_images[i, 0] + 1) / 2).clamp(0, 1).numpy() * 255
                                   ).astype(np.uint8)
+                    u8 = _to_strip_png(u8)
                     _save_png(os.path.join(out_dir, f"{i:05d}.png"), u8)
+                    strips.append((u8, texts[i] if i < len(texts) else ""))
+                self._log_samples_to_wandb(trainer, epoch + 1, strips)
 
                 nonempty = [s for s in texts if isinstance(s, str) and s.strip()]
                 if nonempty:
@@ -177,3 +190,19 @@ class PixelGenEvalCallback(Callback):
         gathered = [None for _ in range(world_size)]
         dist.all_gather_object(gathered, local_list)
         return [x for sub in gathered for x in sub]
+
+    @staticmethod
+    def _log_samples_to_wandb(trainer, epoch, strips):
+        """Log generated glyph strips + decoded text as a wandb.Table (rank-0 only)."""
+        logger = getattr(trainer, "logger", None)
+        exp = getattr(logger, "experiment", None)
+        if exp is None or not strips:
+            return
+        try:
+            import wandb
+            table = wandb.Table(columns=["epoch", "idx", "image", "decoded"])
+            for i, (u8, text) in enumerate(strips):
+                table.add_data(epoch, i, wandb.Image(u8), text)
+            exp.log({"samples": table, "epoch": epoch})
+        except Exception as e:                    # wandb missing / logger not wandb -> skip
+            print(f"[pixel-eval] wandb sample log skipped ({e})")
