@@ -204,19 +204,26 @@ manual optimizer step, the LR schedule, and checkpoint plumbing are inherited fr
 
 ## 6. Running it
 
+Easiest — the launcher `pixel/train_pixel.sh` (sets GPUs, LM1B/HF caches, auto-resume):
+
 ```bash
 cd pytorch_lightning/
-
-# 4-GPU DDP, full config
-torchrun --nproc_per_node=4 --master_port=29503 train_pixel_lightning.py \
-    --config configs/training_configs/train_lm1b_pixel_ELF-B.yml
-
-# fast smoke (few docs, tiny eval) — single GPU
-torchrun --nproc_per_node=1 train_pixel_lightning.py \
-    --config configs/training_configs/train_lm1b_pixel_ELF-B.yml \
-    --config_override limit_documents=200000 --config_override epochs=2 \
-    --config_override online_eval=false
+bash pixel/train_pixel.sh                       # all visible GPUs, full config
+GPUS=0,1,2,3 bash pixel/train_pixel.sh          # pick GPUs
+SMOKE=1 bash pixel/train_pixel.sh               # tiny fast sanity run (no eval/wandb)
+bash pixel/train_pixel.sh --config_override epochs=30 --config_override lr=1e-4
 ```
+
+Or call the entry directly:
+
+```bash
+torchrun --standalone --nproc_per_node=4 train_pixel_lightning.py \
+    --config configs/training_configs/train_lm1b_pixel_ELF-B.yml
+```
+
+> **`use_flash` portability:** the FA4 (CuTeDSL) kernel only exists on Hopper/
+> Blackwell. On Ampere (A100) the model auto-falls back to PyTorch SDPA in bf16,
+> so `use_flash: true` runs everywhere; set `use_flash: false` to force fp32 SDPA.
 
 Outputs land in `output_dir`: `last.ckpt` + per-epoch checkpoints, `config.yml`
 snapshot, and (when `online_eval`) `pixel_epoch_NNN/{decoded.txt, *.png,

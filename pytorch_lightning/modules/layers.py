@@ -150,8 +150,16 @@ def _flash4_bf16(q, k, v):
     the last dim (head_dim) contiguous and 16-byte aligned — overall contiguity
     is not required. After `transpose(1, 2)`, head_dim is still stride-1, so we
     pass the transposed view directly. The `.to(bf16)` cast preserves strides.
+
+    FA4 (CuTeDSL) only ships for Hopper/Blackwell. On older GPUs (e.g. Ampere/
+    A100) `flash_attn.cute` is absent — fall back to PyTorch SDPA in bf16, which
+    uses the built-in FlashAttention-2 kernel and matches the precision contract
+    (bf16 attention, output cast back). Keeps `use_flash: true` portable.
     """
-    from flash_attn.cute import flash_attn_func
+    try:
+        from flash_attn.cute import flash_attn_func
+    except Exception:
+        return _flash_sdpa_bf16(q, k, v)
 
     target_dtype = torch.bfloat16
     out_dtype = q.dtype
