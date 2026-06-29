@@ -105,6 +105,32 @@ def load_lm1b(split: str = "train", cache_dir: str = None, max_files: int = None
                                  cache_dir=cache_dir)
 
 
+def load_openwebtext(split: str = "train", cache_dir: str = None):
+    """Return an HF Dataset with one document per row (column ``text``).
+
+    Forward-compatible path for the larger setup (OWT @ 1024 patches). The
+    windowing dataset + collate below are dataset-agnostic — they only need a
+    ``text`` column — so OWT slots in with no other change. Untested at runtime
+    here (the raw corpus is a large download); LM1B is the validated path.
+    """
+    import datasets
+    hf_split = {"train": "train[:-100000]", "valid": "train[-100000:]",
+                "validation": "train[-100000:]", "test": "train[-100000:]",
+                "all": "train"}.get(split, split)
+    return datasets.load_dataset("Skylion007/openwebtext", split=hf_split,
+                                 cache_dir=cache_dir, trust_remote_code=True)
+
+
+def load_text_dataset(name: str, split: str = "train", cache_dir: str = None):
+    """Dispatch by dataset name -> HF Dataset with a ``text`` column."""
+    name = (name or "lm1b").lower()
+    if name in ("lm1b", "1b", "billion_word"):
+        return load_lm1b(split=split, cache_dir=cache_dir)
+    if name in ("openwebtext", "owt"):
+        return load_openwebtext(split=split, cache_dir=cache_dir)
+    raise ValueError(f"Unknown dataset {name!r} (expected 'lm1b' or 'openwebtext')")
+
+
 # ---------------------------------------------------------------------------
 # Continuous fixed-width windowing (pygame-free port)
 # ---------------------------------------------------------------------------

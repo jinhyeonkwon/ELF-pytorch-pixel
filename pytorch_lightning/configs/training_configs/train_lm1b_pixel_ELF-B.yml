@@ -7,18 +7,27 @@
 # See pixel/README.md.
 
 # --- Pixel geometry / vocab ---
+# Geometry is fully parametric: N (patch tokens) = img_width // patch_w, and
+# chars_per_token = patch_w // char_w are DERIVED — nothing is hardcoded to 20.
+# Scaling targets (just change img_width; max_length auto-derives):
+#   * this demo : img_width 1280   -> N=20   patches (160 chars)
+#   * LM1B big  : img_width 8192   -> N=128  patches (1024 chars)
+#   * OWT       : img_width 65536  -> N=1024 patches (8192 chars)
+# To trade granularity for sequence length, shrink patch_w (>= char_w): e.g.
+# patch_w=8 -> 1 char/token (ELF-isomorphic). Strip height stays 16 (=char_h).
 img_height: 16
 img_width: 1280
 patch_h: 16
 patch_w: 64
 char_w: 8
-max_length: 20                # # patch tokens = img_width // patch_w (auto-checked)
+max_length: 20                # # patch tokens = img_width // patch_w (auto-derived/checked)
 vocab_dir: "pixel/assets/bert-base-uncased"
 decode_bottleneck: 256
 
-# --- LM1B data ---
+# --- Text data (rendered to glyph strips) ---
+dataset: lm1b                 # "lm1b" (validated) | "openwebtext" (forward-compat)
 lm1b_split: train
-lm1b_cache_dir: null          # null -> $DATA_DIR/lm1b or HF cache
+lm1b_cache_dir: null          # corpus cache/extract dir; null -> $DATA_DIR/lm1b or HF cache
 limit_documents: null         # set e.g. 200000 for a fast smoke run
 
 # --- Model architecture ---

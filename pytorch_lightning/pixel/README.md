@@ -43,21 +43,40 @@ reconstructs pixels, the decode head reads glyph indices.
 
 ---
 
-## 1. Geometry (defaults, faithful to the source experiment)
+## 1. Geometry — fully parametric
 
-| quantity | value | where |
-|---|---|---|
-| image | 16 × 1280, grayscale, `[-1,+1]` (−1 ink, +1 white bg) | `img_height/img_width` |
-| glyph cell | `char_h=16`, `char_w=8` | atlas meta (must match `img_height`,`char_w`) |
-| patch | 16 × 64 → **N = 20** patch tokens | `patch_h/patch_w` |
-| per-patch flow dim | **P = 16·64 = 1024** | derived (`model.text_encoder_dim`) |
-| chars / patch token | `64/8 = 8` | derived (`chars_per_token`) |
-| OCR target length | `20·8 = 160` chars | derived (`max_chars`) |
-| vocab | bert-base-uncased glyph atlas, **V = 1000** (998 chars + UNK + EOS) | `pixel/assets/…` |
-| backbone | ELFPixel-B: depth 12, hidden 768, 12 heads (~89M params) | `model` |
+Nothing is hardcoded to "20 patches". Everything is **derived from config** and the
+code is verified at N = 20 / 128 / 1024 and at `chars_per_token` = 8 / 4 / 1:
 
-`max_length` (the transformer sequence length) is **derived** as
-`img_width // patch_w`; the train entry overrides the YAML value if inconsistent.
+```
+N (patch tokens, = transformer seq len)  = img_width // patch_w
+P (per-patch flow dim, "text_encoder_dim") = in_channels · patch_h · patch_w
+chars_per_token (cpt)                     = patch_w // char_w
+max_chars (OCR target length)             = N · cpt   (= img_width // char_w)
+```
+
+Invariants (asserted in `train_pixel_lightning.py`): `patch_h == img_height` (the
+glyph strip is a **single patch row**, always 16 px tall = atlas `char_h`);
+`patch_w` divides `img_width`; `char_w` divides `patch_w` (so `cpt ≥ 1`). The
+transformer's RoPE length tracks `max_length = N` automatically — large N just
+means a longer sequence, no code change.
+
+| config | `img_width` | `patch_w` | → N | cpt | chars | use |
+|---|---|---|---|---|---|---|
+| **demo (this YAML)** | 1280 | 64 | **20** | 8 | 160 | quick LM1B runs |
+| **LM1B big** | 8192 | 64 | **128** | 8 | 1024 | scaled LM1B |
+| **OWT** | 65536 | 64 | **1024** | 8 | 8192 | OpenWebText |
+| ELF-isomorphic | 1280 | 8 | 160 | 1 | 160 | 1 char/token (like ELF token unembed) |
+
+To get more patches you either widen the image (more chars) **or** shrink `patch_w`
+(finer patches, fewer chars/token, smaller OCR head). Minimum `patch_w = char_w = 8`
+(cpt = 1). Just set `img_width` / `patch_w` in the YAML — `max_length` is
+recomputed from `img_width // patch_w` (the entry overrides any stale YAML value).
+
+Fixed across all configs: strip height 16, glyph cell `char_h=16` / `char_w=8`,
+vocab `V = 1000` (bert-base-uncased atlas: 998 chars + UNK + EOS), backbone
+ELFPixel-B (depth 12, hidden 768, 12 heads; ~89M params at the demo geometry — the
+denoiser/OCR head sizes scale with `P` and `cpt`).
 
 ---
 
@@ -105,10 +124,11 @@ RoPE, `ELFBlock` stack with qk-norm + SwiGLU + RoPE, FA4/SDPA), with three swaps
   `self_cond_proj(2P→P)` collapses it (as ELF's does for `2D`).
 - **denoiser head**: `FinalLayer(hidden, patch_size=1, out_channels=P)` →
   `(B,N,P)` **x-prediction** (zero-init, ELF's adaLN-zero-style output). `unpatchify`
-  turns it back into a `(B,1,16,1280)` image for visualization.
+  turns it back into a `(B,1,16,img_width)` image for visualization.
 - **OCR decode head**: `RMSNorm → Linear(hidden→decode_bottleneck) → GELU →
-  Linear(→ cpt·V)` reshaped to `(B, N·cpt, V) = (B,160,V)`. Char alignment is exact
-  because rendering is monospaced at `char_w` and `patch_w` is a multiple of it.
+  Linear(→ cpt·V)` reshaped to `(B, N·cpt, V) = (B, max_chars, V)`. Char alignment
+  is exact because rendering is monospaced at `char_w` and `patch_w` is a multiple
+  of it.
 
 `forward(x, t, attention_mask, self_cond_cfg_scale, decoder_step_active)` keeps
 ELF's exact contract `→ (x_pred, decoder_logits|None)`, so `net_out_to_v_x`,
@@ -146,14 +166,21 @@ the whole "no T5 encoder" difference.
 
 ## 5. The data — `pixel/glyph_dataset.py`
 
-1. `load_lm1b(split)` downloads + extracts the One Billion Word Benchmark once
-   (statmt.org tarball) and exposes it as an HF `Dataset` with a `text` column.
+1. `load_text_dataset(cfg.dataset, …)` returns an HF `Dataset` with a `text`
+   column. `dataset: lm1b` (validated) downloads + extracts the One Billion Word
+   Benchmark once (statmt.org tarball); `dataset: openwebtext` (forward-compat,
+   untested here — large download) loads `Skylion007/openwebtext`. Adding another
+   corpus = one loader returning a `text` column; everything below is
+   dataset-agnostic.
 2. `ContinuousDocumentStreamDataset` builds a char-prefix index over
    `doc + EOS + next_doc + EOS …` and yields fixed-length windows of
-   `img_width // char_w = 160` characters — `{"text": <window>}`.
+   `img_width // char_w` characters — `{"text": <window>}`. The window length
+   scales with the geometry (160 / 1024 / 8192 chars for the N = 20 / 128 / 1024
+   configs).
 3. `make_glyph_collate_with_labels` BERT-normalizes each window, maps codepoints
    through the LUT, gathers glyph cells from the in-memory atlas (no rendered image
-   is ever cached), and emits `pixel_values (B,1,16,1280)` + `char_indices (B,160)`.
+   is ever cached), and emits `pixel_values (B,1,16,img_width)` +
+   `char_indices (B, max_chars)`.
 
 > Building the window index scans `limit_documents` documents up front (set
 > `limit_documents` for a fast smoke run; `null` = the full corpus, which is slow

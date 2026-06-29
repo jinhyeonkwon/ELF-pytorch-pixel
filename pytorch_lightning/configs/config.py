@@ -143,7 +143,8 @@ class Config:
     char_w: int = 8                 # glyph cell width (== atlas char_w)
     decode_bottleneck: int = 256    # OCR decode-head bottleneck
     vocab_dir: str = "pixel/assets/bert-base-uncased"   # glyph atlas + LUT + meta
-    lm1b_cache_dir: str = None      # where LM1B is downloaded/extracted (or $DATA_DIR/lm1b)
+    dataset: str = "lm1b"           # "lm1b" (validated) | "openwebtext" (forward-compat)
+    lm1b_cache_dir: str = None      # corpus cache/extract dir (or $DATA_DIR/lm1b); used for both datasets
     lm1b_split: str = "train"
     limit_documents: int = None     # cap #documents (None == full corpus)
     pixel_sample_method: str = "ode"   # "ode" | "sde" for generation/eval

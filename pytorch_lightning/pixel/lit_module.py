@@ -27,7 +27,7 @@ from lightning_module import ELFLitModule
 from utils.sampling_utils import add_noise, net_out_to_v_x, sample_timesteps
 
 from pixel.glyph_dataset import (
-    ContinuousDocumentStreamDataset, load_lm1b, make_glyph_collate_with_labels,
+    ContinuousDocumentStreamDataset, load_text_dataset, make_glyph_collate_with_labels,
 )
 from pixel.glyph_vocab import IGNORE_INDEX, GlyphAtlasVocab
 from pixel.model import ELFPixel_models, patchify
@@ -155,7 +155,8 @@ class PixelGlyphDataModule(L.LightningDataModule):
     def setup(self, stage=None):
         if self._train_dataset is None:
             cfg = self.cfg
-            source = load_lm1b(split=cfg.lm1b_split, cache_dir=cfg.lm1b_cache_dir)
+            source = load_text_dataset(cfg.dataset, split=cfg.lm1b_split,
+                                       cache_dir=cfg.lm1b_cache_dir)
             chars_per_window = cfg.img_width // cfg.char_w
             self._train_dataset = ContinuousDocumentStreamDataset(
                 source, chars_per_window=chars_per_window,
