@@ -132,6 +132,23 @@ class Config:
     epoch_eval_sde_gamma: float = 1.5
     epoch_eval_self_cond_cfg_scale: float = 3.0
 
+    # --- Pixel-vocab variant (glyph-strip flow; see pixel/README.md) ---------
+    # Only used by train_pixel_lightning.py / eval_pixel_lightning.py. The flow
+    # runs over a sequence of glyph-strip patches instead of T5 embeddings, so
+    # the encoder fields above are ignored in pixel mode.
+    img_height: int = 16            # glyph strip height (== atlas char_h)
+    img_width: int = 1280           # glyph strip width (chars_per_window * char_w)
+    patch_h: int = 16               # patch height (== img_height; single patch row)
+    patch_w: int = 64               # patch width -> chars_per_token = patch_w // char_w
+    char_w: int = 8                 # glyph cell width (== atlas char_w)
+    decode_bottleneck: int = 256    # OCR decode-head bottleneck
+    vocab_dir: str = "pixel/assets/bert-base-uncased"   # glyph atlas + LUT + meta
+    lm1b_cache_dir: str = None      # where LM1B is downloaded/extracted (or $DATA_DIR/lm1b)
+    lm1b_split: str = "train"
+    limit_documents: int = None     # cap #documents (None == full corpus)
+    pixel_sample_method: str = "ode"   # "ode" | "sde" for generation/eval
+    pixel_eval_num_images: int = 4  # glyph-strip PNGs dumped per epoch eval
+
 
 def load_config_from_yaml(path: Optional[str]) -> Config:
     cfg = Config()

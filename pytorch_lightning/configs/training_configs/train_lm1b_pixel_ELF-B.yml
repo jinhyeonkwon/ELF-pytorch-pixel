@@ -1,0 +1,104 @@
+# ELF pixel-vocab variant — minimal baseline on LM1B (glyph-strip flow).
+#
+# The flow runs over glyph-strip patches (16x1280 image, 16x64 patch -> 20 tokens,
+# 8 chars/token, vocab V=1000 bert-base-uncased glyph atlas). Minimal baseline =
+# pixel velocity-MSE denoiser + OCR cross-entropy decoder ONLY (no self-cond / CFG;
+# those knobs exist in the model + flow utils and can be turned on later).
+# See pixel/README.md.
+
+# --- Pixel geometry / vocab ---
+img_height: 16
+img_width: 1280
+patch_h: 16
+patch_w: 64
+char_w: 8
+max_length: 20                # # patch tokens = img_width // patch_w (auto-checked)
+vocab_dir: "pixel/assets/bert-base-uncased"
+decode_bottleneck: 256
+
+# --- LM1B data ---
+lm1b_split: train
+lm1b_cache_dir: null          # null -> $DATA_DIR/lm1b or HF cache
+limit_documents: null         # set e.g. 200000 for a fast smoke run
+
+# --- Model architecture ---
+model: ELFPixel-B             # depth 12, hidden 768, heads 12
+bottleneck_dim: 128
+num_time_tokens: 4
+num_model_mode_tokens: 4      # decode-mode signal (denoiser vs OCR)
+num_self_cond_cfg_tokens: 0   # minimal baseline: CFG off
+attn_dropout: 0.0
+proj_dropout: 0.0
+
+# --- Denoiser objective (pixel velocity MSE) ---
+denoiser_p_mean: -0.8
+denoiser_p_std: 0.8
+denoiser_noise_scale: 1.0
+t_eps: 0.05
+time_schedule: "logit_normal"
+
+# --- Decoder objective (OCR cross-entropy) ---
+decoder_prob: 0.2
+decoder_noise_scale: 2.0
+decoder_p_mean: 0.8
+decoder_p_std: 0.8
+
+# --- Conditioning ---
+self_cond_prob: 0.0           # minimal baseline: self-conditioning off
+
+# --- Training ---
+epochs: 60
+global_batch_size: 512
+lr: 0.0002                    # constant; AdamW
+blr: -1
+min_lr: 0.0
+lr_schedule: "constant"
+warmup_epochs: 5
+warmup_steps: -1
+weight_decay: 0.0
+optimizer: adamw
+adam_b1: 0.9
+adam_b2: 0.95
+grad_accum_steps: 1
+
+# --- EMA ---
+ema_decay1: 0.9999
+
+# --- Sampling / eval ---
+pixel_sample_method: "ode"    # "ode" (Euler) | "sde"
+num_samples: 256
+
+# --- Logging / checkpointing ---
+log_freq: 100
+save_freq: 10
+eval_freq: 10
+
+# --- Output ---
+output_dir: "outputs/elf_pixel_lm1b"
+resume: null
+
+# --- Wandb ---
+use_wandb: false
+wandb_project: elf-pixel
+wandb_entity: null
+wandb_run_name: elf_pixel_lm1b
+
+# --- Misc ---
+seed: 42
+num_workers: 8
+prefetch_factor: 4
+pin_memory: true
+persistent_workers: true
+
+# --- Optimization knobs ---
+use_flash: true
+precision: bf16-mixed
+
+# --- Per-epoch eval callback ---
+epoch_eval_num_samples: 64
+epoch_eval_num_sampling_steps: 256
+epoch_eval_sde_gamma: 1.5
+pixel_eval_num_images: 4
+eval_ppl_model: gpt2-large
+eval_ppl_batch_size: 16
+eval_ppl_max_length: 128
