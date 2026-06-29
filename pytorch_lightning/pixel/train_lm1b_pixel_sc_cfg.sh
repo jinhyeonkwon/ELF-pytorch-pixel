@@ -17,13 +17,13 @@ PL_DIR="$(dirname "$SCRIPT_DIR")"                            # .../pytorch_light
 cd "$PL_DIR"
 
 # --- knobs (override via env) -------------------------------------------------
-GPUS="${GPUS:-${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}}"
+GPUS="${GPUS:-${CUDA_VISIBLE_DEVICES:-2,3}}"
 export CUDA_VISIBLE_DEVICES="$GPUS"
 NUM_GPUS="$(awk -F',' '{print NF}' <<< "$GPUS")"
 
-CONFIG="${CONFIG:-configs/training_configs/train_lm1b_pixel_ELF-B.yml}"
+CONFIG="${CONFIG:-configs/training_configs/train_lm1b_pixel_ELF-B_sc_cfg.yml}"
 TORCHRUN="${TORCHRUN:-/home/work/miniconda3/envs/jit_jh/bin/torchrun}"   # env with torch+lightning+flash_attn
-OUTPUT_DIR="${OUTPUT_DIR:-outputs/elf_pixel_lm1b}"
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/elf_pixel_lm1b_sc_cfg}"
 
 # --- caches: reuse the already-downloaded LM1B + HF models ---------------------
 export DATA_DIR="${DATA_DIR:-/home/work/RADAR/workspace/KAIST/pixel_lm/jinhyeon/data}"  # -> $DATA_DIR/lm1b

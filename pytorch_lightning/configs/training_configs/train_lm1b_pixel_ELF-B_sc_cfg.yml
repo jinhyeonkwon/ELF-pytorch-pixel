@@ -83,14 +83,14 @@ save_freq: 5
 eval_freq: 5
 
 # --- Output ---
-output_dir: "outputs/elf_pixel_lm1b"
+output_dir: "outputs/elf_pixel_lm1b_sc_cfg"
 resume: null
 
 # --- Wandb ---
 use_wandb: true
 wandb_project: elf-pixel
 wandb_entity: kma_vllab
-wandb_run_name: elf_pixel_lm1b
+wandb_run_name: elf_pixel_lm1b_sc_cfg
 
 # --- Misc ---
 seed: 42
@@ -101,7 +101,7 @@ persistent_workers: true
 
 # --- Optimization knobs ---
 use_flash: true
-precision: fp32
+precision: bf16-mixed
 
 # --- Per-epoch eval callback ---
 epoch_eval_num_samples: 64
