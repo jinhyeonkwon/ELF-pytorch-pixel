@@ -139,7 +139,8 @@ class ContinuousDocumentStreamDataset(Dataset):
 
     def __init__(self, source_dataset, chars_per_window: int,
                  limit_documents: int = None, eos_char: str = EOS_CHAR,
-                 drop_last: bool = True, wrap: bool = False):
+                 drop_last: bool = True, wrap: bool = False,
+                 cache_path: str = None):
         self.source_dataset = source_dataset
         self.chars_per_window = int(chars_per_window)
         self.eos_char = eos_char
@@ -150,12 +151,13 @@ class ContinuousDocumentStreamDataset(Dataset):
         if self.num_documents <= 0:
             raise ValueError("need at least one document")
 
-        lengths = np.empty(self.num_documents, dtype=np.int64)
-        for idx in range(self.num_documents):
-            lengths[idx] = len(self._clean_text(source_dataset[idx]["text"])) + 1  # +EOS
-        self.doc_lengths = lengths
+        # Per-document char lengths are the only expensive part (a full scan of
+        # the corpus). Cache them to disk keyed by (dataset, split, #docs) so
+        # subsequent launches skip the ~minutes-long scan. Everything else
+        # (prefix sums, #windows) is cheap and recomputed from doc_lengths.
+        self.doc_lengths = self._load_or_build_lengths(cache_path)
         self.prefix = np.concatenate(
-            [np.zeros(1, dtype=np.int64), np.cumsum(lengths, dtype=np.int64)])
+            [np.zeros(1, dtype=np.int64), np.cumsum(self.doc_lengths, dtype=np.int64)])
         self.total_chars = int(self.prefix[-1])
         if self.total_chars <= 0:
             raise ValueError("document stream is empty")
@@ -164,6 +166,35 @@ class ContinuousDocumentStreamDataset(Dataset):
         self.num_windows = int(math.floor(windows) if self.drop_last else math.ceil(windows))
         if self.wrap:
             self.num_windows = max(1, self.num_windows)
+
+    def _load_or_build_lengths(self, cache_path):
+        if cache_path and os.path.exists(cache_path):
+            try:
+                d = np.load(cache_path)
+                if int(d["num_documents"]) == self.num_documents:
+                    print(f"[window-index] loaded cached lengths <- {cache_path} "
+                          f"({self.num_documents} docs)")
+                    return d["doc_lengths"].astype(np.int64, copy=False)
+                print(f"[window-index] cache num_documents mismatch -> rebuilding")
+            except Exception as e:
+                print(f"[window-index] cache load failed ({e}) -> rebuilding")
+
+        lengths = np.empty(self.num_documents, dtype=np.int64)
+        for idx in range(self.num_documents):
+            lengths[idx] = len(self._clean_text(self.source_dataset[idx]["text"])) + 1  # +EOS
+
+        if cache_path:
+            try:
+                os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+                # tmp ends in .npz so np.savez doesn't append it; rename is atomic
+                # (DDP-safe: ranks race, last writer wins; contents are identical).
+                tmp = f"{cache_path}.{os.getpid()}.tmp.npz"
+                np.savez(tmp, doc_lengths=lengths, num_documents=self.num_documents)
+                os.replace(tmp, cache_path)
+                print(f"[window-index] cached lengths -> {cache_path}")
+            except Exception as e:
+                print(f"[window-index] cache save skipped ({e})")
+        return lengths
 
     def __len__(self) -> int:
         return self.num_windows

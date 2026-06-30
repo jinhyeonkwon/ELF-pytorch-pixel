@@ -19,6 +19,7 @@ Everything in `utils/sampling_utils.py` is reused: `add_noise`, `sample_timestep
 exactly as they do on T5 (B, L, D) embeddings.
 """
 
+import os
 from typing import Dict
 
 import lightning as L
@@ -215,7 +216,20 @@ class PixelGlyphDataModule(L.LightningDataModule):
             chars_per_window = cfg.img_width // cfg.char_w
             self._train_dataset = ContinuousDocumentStreamDataset(
                 source, chars_per_window=chars_per_window,
-                limit_documents=cfg.limit_documents, drop_last=True, wrap=False)
+                limit_documents=cfg.limit_documents, drop_last=True, wrap=False,
+                cache_path=self._index_cache_path())
+
+    def _index_cache_path(self):
+        """Disk cache for the per-document length scan (keyed by dataset/split/#docs).
+        Depends only on the corpus, not on geometry, so it's shared across configs."""
+        cfg = self.cfg
+        base = (cfg.index_cache_dir
+                or (os.path.join(cfg.lm1b_cache_dir, "window_index") if cfg.lm1b_cache_dir
+                    else os.path.join(os.environ.get("DATA_DIR",
+                                                      os.path.expanduser("~/.cache/elf_pixel")),
+                                      "window_index")))
+        docs = cfg.limit_documents if cfg.limit_documents is not None else "all"
+        return os.path.join(base, f"{cfg.dataset}_{cfg.lm1b_split}_docs{docs}.npz")
 
     def train_dataloader(self):
         cfg = self.cfg

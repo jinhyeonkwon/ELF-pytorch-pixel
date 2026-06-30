@@ -147,6 +147,7 @@ class Config:
     lm1b_cache_dir: str = None      # corpus cache/extract dir (or $DATA_DIR/lm1b); used for both datasets
     lm1b_split: str = "train"
     limit_documents: int = None     # cap #documents (None == full corpus)
+    index_cache_dir: str = None     # window-index (doc-length scan) cache dir; None -> derive from data dir
     pixel_sample_method: str = "ode"   # "ode" | "sde" for generation/eval
     pixel_eval_num_images: int = 4  # glyph-strip PNGs dumped per epoch eval
 

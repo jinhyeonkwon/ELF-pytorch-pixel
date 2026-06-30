@@ -196,9 +196,12 @@ manual optimizer step, the LR schedule, and checkpoint plumbing are inherited fr
    is ever cached), and emits `pixel_values (B,1,16,img_width)` +
    `char_indices (B, max_chars)`.
 
-> Building the window index scans `limit_documents` documents up front (set
-> `limit_documents` for a fast smoke run; `null` = the full corpus, which is slow
-> to index once, exactly as in the source experiment).
+> Building the window index scans every document once to get its length (slow on
+> full LM1B). The per-document lengths are **cached to disk** keyed by
+> `(dataset, split, #docs)` — first launch scans + writes
+> `<index_cache_dir|DATA_DIR>/window_index/<dataset>_<split>_docs<N>.npz`, later
+> launches (and the other pixel config sharing the same corpus) load it instantly.
+> Set `limit_documents` for a fast smoke run; `null` = the full corpus.
 
 ---
 
