@@ -12,6 +12,7 @@ Usage (4-GPU DDP):
 """
 
 import argparse
+import datetime
 import logging
 import math
 import os
@@ -20,6 +21,14 @@ import sys
 
 import torch
 import yaml
+
+# Share DataLoader-worker tensors via the file-system strategy instead of the
+# default file-descriptor one. On shared nodes the fd strategy can hit
+# "could not unlink the shared memory file ... No such file or directory" when an
+# external /dev/shm cleaner (or systemd RemoveIPC) removes the unlinked-fd shm
+# file out from under a worker; that kills the worker, hangs the rank, and trips
+# the NCCL collective-timeout on the other ranks. file_system avoids that race.
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if REPO_ROOT not in sys.path:
@@ -111,7 +120,12 @@ def main():
             eval_ppl_model=cfg.eval_ppl_model, eval_ppl_batch_size=cfg.eval_ppl_batch_size,
             eval_ppl_max_length=cfg.eval_ppl_max_length))
 
-    strategy = DDPStrategy(find_unused_parameters=True, broadcast_buffers=False)
+    # Raise the NCCL collective timeout well above the 30-min default: the
+    # per-epoch eval (long ODE/SDE generation + gpt2-large gen-PPL on rank 0)
+    # can leave other ranks waiting at the next collective; 30 min could abort a
+    # multi-hour run. 2h is comfortable headroom.
+    strategy = DDPStrategy(find_unused_parameters=True, broadcast_buffers=False,
+                           timeout=datetime.timedelta(hours=2))
     trainer = L.Trainer(
         max_epochs=cfg.epochs, accelerator="gpu", devices=-1, strategy=strategy,
         precision=_resolve_precision(cfg.precision),
