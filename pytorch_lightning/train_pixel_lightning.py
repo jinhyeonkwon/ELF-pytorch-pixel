@@ -105,10 +105,20 @@ def main():
     eval_sc_cfg_scale = (cfg.epoch_eval_self_cond_cfg_scale
                          if cfg.num_self_cond_cfg_tokens > 0 else 1.0)
 
-    callbacks = [ModelCheckpoint(
+    # Two checkpointers: (1) a cheap, frequent `last.ckpt` refreshed every
+    # `save_steps` train steps so a mid-epoch crash loses minutes, not epochs
+    # (critical on this node where an external /dev/shm cleaner kills DataLoader
+    # workers periodically); (2) sparse archival checkpoints every `save_freq`
+    # epochs for history. They write distinct files (last.ckpt vs checkpoint_*).
+    callbacks = []
+    if int(cfg.save_steps) > 0:
+        callbacks.append(ModelCheckpoint(
+            dirpath=cfg.output_dir, every_n_train_steps=int(cfg.save_steps),
+            save_top_k=0, save_last=True, auto_insert_metric_name=False))
+    callbacks.append(ModelCheckpoint(
         dirpath=cfg.output_dir, filename="checkpoint_epoch{epoch:02d}_step{step:08d}",
         every_n_epochs=int(cfg.save_freq) if cfg.save_freq >= 1 else 1,
-        save_top_k=-1, save_last=True, auto_insert_metric_name=False)]
+        save_top_k=-1, save_last=(int(cfg.save_steps) <= 0), auto_insert_metric_name=False))
     if cfg.online_eval and cfg.eval_freq >= 1:
         callbacks.append(PixelGenEvalCallback(
             vocab=vocab, output_dir=cfg.output_dir,

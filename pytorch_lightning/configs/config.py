@@ -101,7 +101,8 @@ class Config:
     # Logging / checkpointing
     log_freq: int = 100
     eval_freq: int = 10
-    save_freq: float = 100
+    save_freq: float = 100          # epochs between kept ARCHIVAL checkpoints
+    save_steps: int = 2000          # train-steps between last.ckpt refreshes (cheap resume); 0 disables
 
     # Output
     output_dir: str = "./output_dir"
